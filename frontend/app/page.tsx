@@ -6,22 +6,30 @@ export default function Home() {
   const [mode, setMode] = useState("text");
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState("");
-  const [url, setUrl] = useState("");
   const [maxTokens, setMaxTokens] = useState(512);
   const [summary, setSummary] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const MAX_FILE_SIZE = 1 * 1024 * 1024;
+  const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1 MB
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (!selectedFile) return;
 
+    // Validasi ukuran file
     if (selectedFile.size > MAX_FILE_SIZE) {
-      setError("❌ Ukuran file melebihi batas maksimum 5 MB.");
+      setError("❌ Ukuran file melebihi batas maksimum 1 MB.");
       setFile(null);
-      e.target.value = ""; 
+      e.target.value = "";
+      return;
+    }
+
+    // Validasi ekstensi .pdf
+    if (!selectedFile.name.toLowerCase().endsWith(".pdf")) {
+      setError("❌ Hanya file dengan ekstensi .pdf yang diperbolehkan.");
+      setFile(null);
+      e.target.value = "";
       return;
     }
 
@@ -30,8 +38,8 @@ export default function Home() {
   };
 
   const handleSubmit = async () => {
-    if (!text.trim() && !file && !url.trim()) {
-      setError("Masukkan teks, upload file, atau isi URL terlebih dahulu.");
+    if (!text.trim() && !file) {
+      setError("Masukkan teks atau upload file PDF terlebih dahulu.");
       return;
     }
 
@@ -43,17 +51,26 @@ export default function Home() {
     formData.append("max_tokens", maxTokens.toString());
     if (file) formData.append("file", file);
     if (text) formData.append("text", text);
-    if (url) formData.append("url", url);
 
     try {
       const res = await axios.post("http://localhost:5000/summarize", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      if (res.data.summary) setSummary(res.data.summary);
-      else setError(res.data.error || "Gagal menghasilkan ringkasan");
+
+      // Tangani pesan error dari backend (termasuk "bukan PDF asli")
+      if (res.data.error) {
+        setError("❌ " + res.data.error);
+        return;
+      }
+
+      if (res.data.summary) {
+        setSummary(res.data.summary);
+      } else {
+        setError("❌ Gagal menghasilkan ringkasan.");
+      }
     } catch (err) {
       console.error(err);
-      setError("Terjadi kesalahan saat memanggil backend.");
+      setError("❌ Terjadi kesalahan saat memanggil backend.");
     } finally {
       setLoading(false);
     }
@@ -63,12 +80,13 @@ export default function Home() {
     <main className="min-h-screen bg-gradient-to-b from-blue-50 to-white flex flex-col items-center justify-center py-10 px-4">
       <div className="bg-white shadow-lg rounded-2xl p-8 max-w-2xl w-full">
         <h1 className="text-2xl font-bold text-blue-800 text-center">
-          📄 Ringkas PDF, atau Teks Milikmu
+          📄 Ringkas PDF atau Teks Milikmu
         </h1>
         <p className="text-gray-600 text-center mt-2">
           Pilih salah satu mode input untuk meringkas.
         </p>
 
+        {/* Tombol pilihan mode */}
         <div className="flex justify-center gap-4 mt-6">
           <button
             onClick={() => setMode("text")}
@@ -78,7 +96,7 @@ export default function Home() {
                 : "bg-gray-100 hover:bg-gray-200"
             }`}
           >
-            ✍️ Teks
+            Teks
           </button>
           <button
             onClick={() => setMode("file")}
@@ -88,7 +106,7 @@ export default function Home() {
                 : "bg-gray-100 hover:bg-gray-200"
             }`}
           >
-            📁 PDF
+            PDF
           </button>
         </div>
 
@@ -106,7 +124,7 @@ export default function Home() {
           {mode === "file" && (
             <div>
               <label className="block font-semibold mb-2 text-gray-800">
-                Upload PDF (maks. 5 MB):
+                Upload PDF (maks. 1 MB):
               </label>
               <input
                 type="file"
@@ -114,14 +132,30 @@ export default function Home() {
                 onChange={handleFileChange}
                 className="w-full text-sm text-gray-700"
               />
+
+              {/* Keterangan tipe file */}
+              <p className="text-gray-500 text-sm mt-2 flex items-start gap-1">
+                <span className="text-blue-500 font-semibold">ℹ️</span>
+                Hanya file PDF asli yang berisi teks 
+                dengan ukuran maksimal 1 MB.
+              </p>
+
+              {/* Info file terpilih */}
               {file && (
-                <p className="text-sm text-gray-500 mt-1">
-                  📎 File terpilih: {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)  
+                <p className="text-sm text-gray-500 mt-2">
+                  📎 File terpilih: {file.name} (
+                  {(file.size / 1024 / 1024).toFixed(2)} MB)
+                </p>
+              )}
+
+              {/* Pesan error untuk file */}
+              {error && mode === "file" && (
+                <p className="text-red-500 text-sm mt-2 whitespace-pre-line">
+                  {error}
                 </p>
               )}
             </div>
           )}
-
         </div>
 
         {/* Slider token */}
@@ -141,7 +175,7 @@ export default function Home() {
           />
         </div>
 
-        {/* Tombol ringkas */}
+        {/* Tombol kirim */}
         <div className="mt-6 flex justify-center">
           <button
             onClick={handleSubmit}
@@ -152,12 +186,12 @@ export default function Home() {
                 : "bg-blue-600 hover:bg-blue-700 hover:scale-105"
             }`}
           >
-            {loading ? "🤖 Meringkas..." : "🚀 Ringkas Sekarang"}
+            {loading ? " Meringkas..." : " Ringkas Sekarang"}
           </button>
         </div>
 
-        {/* Pesan error */}
-        {error && (
+        {/* Pesan error umum */}
+        {error && mode !== "file" && (
           <p className="text-red-500 mt-4 text-center whitespace-pre-line">
             {error}
           </p>

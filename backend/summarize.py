@@ -6,11 +6,7 @@ import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 import uvicorn
-import requests
 from io import BytesIO
-from pdf2image import convert_from_bytes
-import pytesseract
-from bs4 import BeautifulSoup
 
 # Inisialisasi FastAPI
 app = FastAPI()
@@ -30,6 +26,8 @@ genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 MAX_FILE_SIZE_MB = 1
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024  
 
+
+# --- Middleware untuk membatasi ukuran upload ---
 @app.middleware("http")
 async def limit_upload_size(request: Request, call_next):
     if request.headers.get("content-length"):
@@ -44,138 +42,121 @@ async def limit_upload_size(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Fungsi ekstrak teks PDF
+
+# --- Fungsi untuk validasi dan ekstraksi teks PDF ---
 def extract_text_from_pdf(file):
     try:
-        reader = PdfReader(file)
+        # Validasi awal: cek magic number PDF
+        file_bytes = file.read()
+        if not file_bytes.startswith(b"%PDF-"):
+            return {"error": "File ini bukan PDF asli. Harap unggah file PDF yang valid."}
+
+        # Kembalikan pointer ke awal agar bisa dibaca PyPDF2
+        file.seek(0)
+        reader = PdfReader(BytesIO(file_bytes))
+
         text = ""
-        for page in reader.pages:
+        page_count = len(reader.pages)
+
+        # Baca teks dari tiap halaman
+        for page_num, page in enumerate(reader.pages):
             page_text = page.extract_text()
             if page_text and page_text.strip():
                 text += page_text + "\n"
-        if text.strip():
-            return text.strip()
-        else:
-            return None
-    except Exception:
-        return None
 
-# Fungsi download file dari URL
-def download_file_from_url(url: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, timeout=30, headers=headers)
-    response.raise_for_status()
-    return response.content
+        # Jika tidak ada teks yang bisa diambil
+        if not text.strip():
+            return {"error": "PDF ini tidak mengandung teks. Kemungkinan merupakan hasil scan atau gambar."}
 
-# Fungsi proses URL dengan PDF, OCR, HTML, teks
-def process_url(url: str):
-    try:
-        content = download_file_from_url(url)
+        # Validasi tambahan: metadata PDF
+        metadata = reader.metadata
+        if not metadata or "Producer" not in metadata:
+            print("⚠️ Peringatan: PDF ini mungkin tidak memiliki metadata standar.")
 
-        # Coba PDF teks
-        pdf_text = extract_text_from_pdf(BytesIO(content))
-        if pdf_text:
-            print("DEBUG: Berhasil ekstrak PDF teks")
-            return pdf_text
-
-        # PDF scan → OCR
-        try:
-            images = convert_from_bytes(content)
-            ocr_text = ""
-            for img in images:
-                ocr_text += pytesseract.image_to_string(img, lang="eng+ind") + "\n"
-            if ocr_text.strip():
-                print("DEBUG: Berhasil ekstrak PDF scan dengan OCR")
-                return ocr_text.strip()
-        except Exception as e_ocr:
-            print(f"DEBUG: OCR gagal: {e_ocr}")
-
-        # Coba decode sebagai teks plain
-        try:
-            text = content.decode("utf-8")
-            if text.strip():
-                print("DEBUG: Berhasil ekstrak sebagai teks plain")
-                return text[:15000]
-        except:
-            pass
-
-        # Coba ekstrak dari HTML
-        try:
-            soup = BeautifulSoup(content, "lxml")
-            html_text = soup.get_text(separator="\n")
-            if html_text.strip():
-                print("DEBUG: Berhasil ekstrak teks dari HTML")
-                return html_text[:15000]
-        except Exception as e_html:
-            print(f"DEBUG: HTML parse gagal: {e_html}")
-
-        return "❌ URL tidak mengarah ke PDF, teks, atau halaman web yang dapat diproses"
+        return {"text": text.strip(), "page_count": page_count}
 
     except Exception as e:
-        return f"❌ Error memproses URL: {str(e)}"
+        return {"error": f"Gagal membaca file PDF: {str(e)}"}
 
-# Endpoint ringkasan
+
+# --- Endpoint ringkasan ---
 @app.post("/summarize")
 async def summarize_api(
     file: UploadFile = File(None),
     text: str = Form(""),
-    url: str = Form(""),
     max_tokens: int = Form(512)
 ):
     try:
         input_text = ""
         source_type = ""
 
+        # Jika input berupa file PDF
         if file and file.filename:
-            if file.filename.lower().endswith('.pdf'):
-                input_text = extract_text_from_pdf(file.file)
-                if not input_text:
-                    return {"error": "PDF tidak memiliki teks yang bisa diproses"}
+            if file.filename.lower().endswith(".pdf"):
+                result = extract_text_from_pdf(file.file)
+                if "error" in result:
+                    return {"error": result["error"]}
+                input_text = result["text"]
                 source_type = "PDF file"
             else:
-                return {"error": "Hanya file PDF yang didukung"}
+                return {"error": "Hanya file PDF yang didukung."}
 
-        elif url.strip():
-            input_text = process_url(url.strip())
-            if not input_text or input_text.startswith("❌"):
-                return {"error": input_text}
-            source_type = "URL"
-
+        # Jika input berupa teks langsung
         elif text.strip():
             input_text = text.strip()
             source_type = "Direct text"
+
         else:
-            return {"error": "Masukkan teks, upload file PDF, atau URL terlebih dahulu."}
+            return {"error": "Masukkan teks atau upload file PDF terlebih dahulu."}
 
         if len(input_text.strip()) < 10:
-            return {"error": "Teks terlalu pendek atau tidak dapat dibaca"}
+            return {"error": "Teks terlalu pendek atau tidak dapat dibaca."}
 
+        # Batasi panjang input untuk efisiensi
+        max_input_length = 10000
+        if len(input_text) > max_input_length:
+            input_text = input_text[:max_input_length]
+
+        # Gunakan model Gemini untuk membuat ringkasan
         model = genai.GenerativeModel("gemini-2.0-flash")
+
         prompt = f"""
         Ringkas teks berikut dalam bahasa Indonesia yang jelas dan mudah dipahami. 
         Fokus pada ide utama dan poin-poin penting.
+        Buat ringkasan dengan panjang sekitar {max_tokens} token.
 
         TEKS:
-        {input_text[:10000]}
+        {input_text}
 
         RINGKASAN:
         """
-        response = model.generate_content(prompt)
+
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=max_tokens
+            )
+        )
+
         if not response.text or not response.text.strip():
-            return {"error": "Gagal menghasilkan ringkasan"}
+            return {"error": "Gagal menghasilkan ringkasan."}
 
         return {
             "summary": response.text.strip(),
             "source_type": source_type,
-            "original_length": len(input_text)
+            "original_length": len(input_text),
+            "max_tokens_used": max_tokens
         }
 
     except Exception as e:
         return {"error": f"Terjadi kesalahan: {str(e)}"}
 
+
+# --- Root endpoint ---
 @app.get("/")
 def root():
     return {"message": "Backend is running ✅"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=5000)
